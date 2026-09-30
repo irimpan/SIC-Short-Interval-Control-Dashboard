@@ -1,0 +1,51 @@
+///$tab Main
+// ============================================================================
+// SIC - Short Interval Control : step 1 - extract to QVD
+// Demo script prepared with AI assistance, based on a live system I designed and built.
+// ----------------------------------------------------------------------------
+// Reads each source table and stores it as a QVD file. The SIC dashboard app
+// (SIC_load_script.qvs) then loads only from these QVDs, which keeps the
+// frequent line-side reloads fast.
+//
+// In the live setup the sources are the machine sensors, line pack counters
+// and ERP. In this demo they are the simulated CSV files in /data.
+//
+// To run: create a folder connection called "SIC_Demo" with the CSV files in
+// it and an empty sub-folder called QVD, then reload this app.
+// ============================================================================
+
+SET vSource = 'lib://SIC_Demo/';
+SET vQvd    = 'lib://SIC_Demo/QVD/';
+
+// One row per source table. Adding a table = adding one row.
+SourceTables:
+LOAD * INLINE [
+TableName
+dim_line
+dim_product
+dim_downtime_reason
+dim_shift
+erp_production_orders
+sensor_machine_events
+counter_pack_counts_hourly
+];
+
+FOR t = 0 TO NoOfRows('SourceTables') - 1
+
+    LET vTable = Peek('TableName', $(t), 'SourceTables');
+
+    [$(vTable)]:
+    LOAD *
+    FROM [$(vSource)$(vTable).csv]
+    (txt, utf8, embedded labels, delimiter is ',', msq);
+
+    STORE [$(vTable)] INTO [$(vQvd)$(vTable).qvd] (qvd);
+
+    LET vRows = NoOfRows('$(vTable)');
+    TRACE >>> $(vTable): $(vRows) rows stored to QVD;
+
+    DROP TABLE [$(vTable)];
+
+NEXT t
+
+DROP TABLE SourceTables;
