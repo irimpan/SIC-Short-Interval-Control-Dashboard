@@ -101,7 +101,6 @@ I led this project from start to finish:
 | Folder | Contents |
 |---|---|
 | `/data` | Simulated sample data: line counters, downtime events and ERP-style product and cost tables |
-| `/sql` | SQL scripts for the staging tables and KPI calculations |
 | `/qlik` | Example load script (.qvs) |
 | `/screenshots` | Dashboard screenshots rebuilt with sample data |
 
