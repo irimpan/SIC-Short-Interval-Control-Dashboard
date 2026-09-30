@@ -1,4 +1,4 @@
-# SIC – Short Interval Control Dashboard
+# SIC – Short Interval Control Live Dashboard
 
 **Live, line-side production reporting for a food manufacturing site**
 
