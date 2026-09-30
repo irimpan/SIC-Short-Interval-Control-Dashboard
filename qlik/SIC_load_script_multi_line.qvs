@@ -1,0 +1,249 @@
+///$tab Main
+// ============================================================================
+// SIC - Short Interval Control : multi-line load script (generic version)
+// ----------------------------------------------------------------------------
+// Loads hourly line-side SIC sheets for several production areas, turns the
+// cumulative pack counter into hourly packs, adds order and standards data,
+// and calculates hourly efficiency, downtime, giveaway and cost by shift.
+//
+// All connection names, file names, areas and lines below are PLACEHOLDERS.
+// Replace them with your own before running.
+//
+// Expected columns in each line sheet:
+//   Line Leader | Date | Time | Order No | Pack Count (cumulative counter)
+//   Checkweigher Avg (g) | Downtime Mins | Downtime Category
+//   Downtime Sub Category | Actions
+// ============================================================================
+
+SET ThousandSep=',';
+SET DecimalSep='.';
+SET MoneyThousandSep=',';
+SET MoneyDecimalSep='.';
+SET MoneyFormat='£ ###0.00;-£ ###0.00';
+SET TimeFormat='hh:mm:ss';
+SET DateFormat='DD/MM/YYYY';
+SET TimestampFormat='DD/MM/YYYY hh:mm:ss';
+SET FirstWeekDay=0;
+SET BrokenWeeks=1;
+SET ReferenceDay=0;
+SET FirstMonthOfYear=1;
+SET CollationLocale='en-GB';
+SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+SET DayNames='Mon;Tue;Wed;Thu;Fri;Sat;Sun';
+
+// ---- Placeholders: change these ------------------------------------------
+SET vSourcePath    = 'lib://SIC_Source/';      // folder with the line-side SIC workbooks
+SET vOrdersFile    = 'lib://SIC_Source/production_orders.qvd';
+SET vStandardsFile = 'lib://SIC_Source/product_standards.qvd';
+
+// Shift pattern (3 x 8 hours). The night shift belongs to the day it started.
+SET vDayShiftStart   = '07:00:00';
+SET vLateShiftStart  = '15:00:00';
+SET vNightShiftStart = '23:00:00';
+
+
+///$tab Line config
+// ---------------------------------------------------------------------------
+// One row per line: which workbook and which sheet to read.
+// Adding a new line = adding one row here, no new code.
+// ---------------------------------------------------------------------------
+LineConfig:
+LOAD * INLINE [
+Area, Workbook, Sheet
+Area A, AREA_A_SIC.xlsx, A1
+Area A, AREA_A_SIC.xlsx, A2
+Area A, AREA_A_SIC.xlsx, A3
+Area B, AREA_B_SIC.xlsx, B1
+Area B, AREA_B_SIC.xlsx, B2
+Area C, AREA_C_SIC.xlsx, Line 01
+Area C, AREA_C_SIC.xlsx, Line 02
+];
+
+
+///$tab Load SIC sheets
+// ---------------------------------------------------------------------------
+// Loop through every line in LineConfig and append its sheet to SIC_Raw.
+// A missing sheet is skipped and logged instead of stopping the reload.
+// ---------------------------------------------------------------------------
+SET ErrorMode = 0;
+
+FOR r = 0 TO NoOfRows('LineConfig') - 1
+
+    LET vArea     = Peek('Area',     $(r), 'LineConfig');
+    LET vWorkbook = Peek('Workbook', $(r), 'LineConfig');
+    LET vSheet    = Peek('Sheet',    $(r), 'LineConfig');
+
+    SIC_Raw:
+    LOAD
+        '$(vArea)'                                   AS Area,
+        '$(vSheet)'                                  AS Line,
+        [Line Leader]                                AS LineLeader,
+        Date(Floor("Date"))                          AS ProdDate,
+        Time(Frac("Time"), 'hh:mm:ss')               AS HourTime,
+        Num#([Order No])                             AS OrderNo,
+        [Pack Count]                                 AS CumulativePacks,
+        [Checkweigher Avg (g)]                       AS CheckweigherAvg_g,
+        [Downtime Mins]                              AS DowntimeMins,
+        60 - [Downtime Mins]                         AS RunMins,
+        Trim([Downtime Category])                    AS DowntimeCategory,
+        Trim([Downtime Sub Category])                AS DowntimeSubCategory,
+        Trim(Actions)                                AS Actions
+    FROM [$(vSourcePath)$(vWorkbook)]
+    (ooxml, embedded labels, table is [$(vSheet)]);
+
+    IF ScriptError > 0 THEN
+        TRACE >>> Skipped $(vArea) / $(vSheet): sheet or file not found;
+    ENDIF
+
+NEXT r
+
+SET ErrorMode = 1;
+DROP TABLE LineConfig;
+
+
+///$tab Orders and standards
+// ---------------------------------------------------------------------------
+// Order -> SKU from the ERP, then product standards by SKU.
+// Inner join keeps only rows with a valid production order.
+// ---------------------------------------------------------------------------
+INNER JOIN (SIC_Raw)
+LOAD
+    Num#(OrderNo)   AS OrderNo,
+    Text(SKU)       AS SKU
+FROM [$(vOrdersFile)] (qvd);
+
+LEFT JOIN (SIC_Raw)
+LOAD
+    Text(SKU)                                   AS SKU,
+    Description,
+    CrewSize,
+    PacksPerCase,
+    TargetPacksPerMin,                          // standard speed at the agreed efficiency factor
+    NetWeightPerCase_kg / PacksPerCase          AS PackWeight_kg,
+    AllowedWeight_g,                            // upper weight limit before it counts as giveaway
+    RawMaterialCostPerCase / PacksPerCase       AS CostPerPack
+FROM [$(vStandardsFile)] (qvd);
+
+
+///$tab Hourly packs
+// ---------------------------------------------------------------------------
+// The line counter is cumulative within an order.
+// Hourly packs = this hour's reading minus the previous hour's reading,
+// reset when the line, order or SKU changes, or when the counter is reset.
+// ---------------------------------------------------------------------------
+HourlyPacks:
+NoConcatenate
+LOAD
+    *,
+    If(CumulativePacks = 0, 0,
+        If(Line = Peek('Line') and OrderNo = Peek('OrderNo') and SKU = Peek('SKU'),
+            If(CumulativePacks < Peek('CumulativePacks'),
+               CumulativePacks,                                  // counter was reset
+               CumulativePacks - Peek('CumulativePacks')),
+            CumulativePacks)) AS HourlyPacks,
+
+    // Shift and production day (night shift after midnight belongs to the previous day)
+    If(HourTime >= Time#('$(vDayShiftStart)', 'hh:mm:ss') and HourTime < Time#('$(vLateShiftStart)', 'hh:mm:ss'), 'Day',
+       If(HourTime >= Time#('$(vLateShiftStart)', 'hh:mm:ss') and HourTime < Time#('$(vNightShiftStart)', 'hh:mm:ss'), 'Late',
+          'Night')) AS Shift,
+
+    If(HourTime < Time#('$(vDayShiftStart)', 'hh:mm:ss'), Date(ProdDate - 1), ProdDate) AS ShiftDate,
+
+    Timestamp(ProdDate + HourTime, 'DD/MM/YYYY hh:mm:ss') AS DateHour
+RESIDENT SIC_Raw
+WHERE Len(Trim(LineLeader)) > 0
+  and Len(Trim(OrderNo)) > 0
+  and Len(Trim(SKU)) > 0
+  and Len(Trim(CumulativePacks)) > 0
+ORDER BY Area, Line, OrderNo, SKU, ProdDate, HourTime;
+
+DROP TABLE SIC_Raw;
+
+
+///$tab Hourly KPIs
+// ---------------------------------------------------------------------------
+// One row per line per hour with the KPIs shown on the line-side screens.
+//   Efficiency  = actual packs per running minute / target packs per minute
+//   Giveaway    = grams packed above the allowed weight, and its cost
+// ---------------------------------------------------------------------------
+SIC_Hourly:
+LOAD
+    Area,
+    Line,
+    LineLeader,
+    Shift,
+    ShiftDate,
+    DateHour,
+    OrderNo,
+    SKU,
+    Description,
+    CrewSize,
+    Sum(HourlyPacks)                                              AS ActualPacks,
+    Sum(HourlyPacks) / Only(PacksPerCase)                         AS Cases,
+    Sum(DowntimeMins)                                             AS DowntimeMins,
+    60 - Sum(DowntimeMins)                                        AS RunMins,
+    Sum(HourlyPacks) * Only(CostPerPack)                          AS OutputCost,
+
+    // Efficiency against standard speed for the running time
+    If(60 - Sum(DowntimeMins) > 0 and Only(TargetPacksPerMin) > 0,
+       Sum(HourlyPacks) / (60 - Sum(DowntimeMins)) / Only(TargetPacksPerMin))   AS Efficiency,
+
+    // Giveaway: average pack weight above the allowed weight
+    If(Avg(CheckweigherAvg_g) > Only(AllowedWeight_g),
+       (Avg(CheckweigherAvg_g) - Only(AllowedWeight_g)) * Sum(HourlyPacks) / 1000, 0)     AS GiveawayOverAllowance_kg,
+
+    // Giveaway against the declared pack weight
+    If(Avg(CheckweigherAvg_g) > 0,
+       (Avg(CheckweigherAvg_g) - Only(PackWeight_kg) * 1000) * Sum(HourlyPacks) / 1000)   AS GiveawayOverDeclared_kg,
+
+    // Cost per kg = cost per pack / pack weight
+    If(Avg(CheckweigherAvg_g) > Only(AllowedWeight_g) and Only(PackWeight_kg) > 0,
+       (Avg(CheckweigherAvg_g) - Only(AllowedWeight_g)) * Sum(HourlyPacks) / 1000
+         * Only(CostPerPack) / Only(PackWeight_kg), 0)                                   AS GiveawayCost,
+
+    Concat(DISTINCT DowntimeCategory,    ', ')                    AS DowntimeCategories,
+    Concat(DISTINCT DowntimeSubCategory, ', ')                    AS DowntimeSubCategories,
+    Concat(DISTINCT Actions,             ', ')                    AS ActionsTaken
+RESIDENT HourlyPacks
+GROUP BY Area, Line, LineLeader, Shift, ShiftDate, DateHour, OrderNo, SKU, Description, CrewSize;
+
+DROP TABLE HourlyPacks;
+
+
+///$tab Current status
+// ---------------------------------------------------------------------------
+// Latest hour and shift per line, used for the "current shift" view on the
+// line screens and for the shift-end email.
+// ---------------------------------------------------------------------------
+LatestHour:
+LOAD
+    Line,
+    Timestamp(Max(DateHour)) AS LatestDateHour
+RESIDENT SIC_Hourly
+GROUP BY Line;
+
+LEFT JOIN (LatestHour)
+LOAD DISTINCT
+    Line,
+    DateHour  AS LatestDateHour,
+    Shift     AS CurrentShift,
+    ShiftDate AS CurrentShiftDate
+RESIDENT SIC_Hourly;
+
+// Flag rows that belong to each line's current shift
+LEFT JOIN (SIC_Hourly)
+LOAD DISTINCT
+    Line,
+    CurrentShift,
+    CurrentShiftDate
+RESIDENT LatestHour;
+
+SIC_Final:
+NoConcatenate
+LOAD
+    *,
+    If(Shift = CurrentShift and ShiftDate = CurrentShiftDate, 1, 0) AS IsCurrentShift
+RESIDENT SIC_Hourly;
+
+DROP TABLE SIC_Hourly;
+DROP FIELDS CurrentShift, CurrentShiftDate FROM SIC_Final;
