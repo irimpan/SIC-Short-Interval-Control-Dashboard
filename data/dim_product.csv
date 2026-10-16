@@ -1,0 +1,5 @@
+ProductCode,ProductName,PackWeight_g,StdPacksPerHour,CostPerPack_GBP
+P100,Product A 250g,250,1800,0.42
+P200,Product B 400g,400,1500,0.61
+P300,Product C 150g,150,2100,0.35
+P400,Product D 1kg,1000,900,1.2

@@ -1,0 +1,8 @@
+ReasonCode,ReasonName,ReasonType
+R01,Changeover,Planned
+R02,Mechanical fault,Unplanned
+R03,Electrical fault,Unplanned
+R04,Waiting for materials,Unplanned
+R05,Cleaning,Planned
+R06,Quality check,Planned
+R07,No operator,Unplanned

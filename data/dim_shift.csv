@@ -1,0 +1,4 @@
+Shift,StartHour,EndHour
+Early,6,14
+Late,14,22
+Night,22,6
